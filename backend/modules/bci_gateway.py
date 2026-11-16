@@ -248,11 +248,30 @@ def _classify_natural_command(clean_cmd: str) -> Optional[Tuple[str, List[str], 
         or any(w in scan for w in ("拿水", "取水", "抓水", "喝水", "端水"))
     )
     has_door = bool(re.search(r"\b(?:door|doors|doorway|doorways|doorframe|entrance)\b", scan)) or ("门" in scan)
+    real_landmark_match = re.search(
+        r"\b(chair|stool|box|cube|table|desk|bin|trashcan|cabinet|shelf|extinguisher|backpack|bag)\b",
+        scan,
+    )
+    zh_landmark_map = {
+        "椅": "chair",
+        "凳": "stool",
+        "盒": "box",
+        "箱": "box",
+        "桌": "table",
+        "柜": "cabinet",
+        "桶": "bin",
+        "灭火器": "fire extinguisher",
+    }
+    zh_landmark = next((en for zh, en in zh_landmark_map.items() if zh in scan), None)
 
     if has_mug and explicit_bottle:
         return None
-    if not (has_mug or has_bottle or has_door):
+    if not (has_mug or has_bottle or has_door or real_landmark_match or zh_landmark):
         return None
+
+    if (real_landmark_match or zh_landmark) and not (has_mug or has_bottle or has_door):
+        lbl = real_landmark_match.group(1) if real_landmark_match else str(zh_landmark)
+        return ("navigate_only", [lbl], [lbl])
 
     if has_door and not (has_mug or has_bottle):
         return (

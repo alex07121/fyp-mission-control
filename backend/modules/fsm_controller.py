@@ -552,6 +552,8 @@ class FSMController:
 
                 stable_frames = 0
                 locked_for_handoff = False
+                real_arrived_streak = 0
+                is_real_adapter = self.adapter.__class__.__name__ == "XLeRobotRealAdapter"
 
                 try:
                     while time.monotonic() < cruise_deadline:
@@ -586,6 +588,14 @@ class FSMController:
                         vln_step = self.adapter.step_vln(command, agent_direction_hint=shared_dir["hint"])
                         premature_stop_rejected = False
                         if vln_step.get("arrived"):
+                            if is_real_adapter and not meas.detected and (time.perf_counter() - t_stage) >= 1.5:
+                                real_arrived_streak += 1
+                                if real_arrived_streak >= 2:
+                                    locked_for_handoff = True
+                                    vln_arrived_By_real = True
+                                    self._stop_if_owner(my_owner_id)
+                                    self._log_event("INFO", "LightNav-0 confirmed arrival twice on real car -> Stopping!")
+                                    break
                             if meas.median_depth_m is None or meas.median_depth_m > (stop_thresh + 0.08):
                                 premature_stop_rejected = True
                                 with self._lock:
@@ -595,6 +605,8 @@ class FSMController:
                                     "GUARD",
                                     f"Rejected premature Light-VLN arrived=True at depth={d_str} (target <= {stop_thresh:.2f}m)",
                                 )
+                        else:
+                            real_arrived_streak = 0
 
                         if meas.detected and meas.median_depth_m is not None:
                             final_dist = meas.median_depth_m
@@ -673,9 +685,9 @@ class FSMController:
             slow_zone = prof["slow_zone_m"]
             lost_count = 0
             servo_deadline = time.monotonic() + 18.0
-            reached_stop = False
+            reached_stop = bool(locals().get("vln_arrived_By_real", False))
 
-            while time.monotonic() < servo_deadline:
+            while (not reached_stop) and time.monotonic() < servo_deadline:
                 if not self._is_epoch_valid(my_m_epoch, my_e_epoch):
                     self._stop_if_owner(my_owner_id)
                     abort_reason = self._resolve_interrupt_reason(my_e_epoch)
