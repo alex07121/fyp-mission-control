@@ -1,14 +1,13 @@
-"""Lightweight HTTP client for remote VLN inference over RustDesk TCP Tunnel (127.0.0.1:9001)."""
+"""Persistent HTTP/HTTPS client for remote VLN inference (supports RustDesk 127.0.0.1 & Cloudflare HTTPS Tunnel)."""
 
 from __future__ import annotations
 
 import base64
-import json
 import logging
 import os
-import urllib.request
 from typing import Any, Dict, Optional
 
+import httpx
 import numpy as np
 
 from backend.modules.cloud_agent import compress_frame_320x240_jpeg
@@ -17,30 +16,28 @@ logger = logging.getLogger("fyp.vln.remote")
 
 
 class RemoteVLNClient:
-    """Sends ~15KB 320x240 JPEG frames over local TCP tunnel to the school 32GB GPU VLN server."""
+    """Sends ~15KB 320x240 JPEG frames over HTTP/HTTPS tunnel to the school 32GB GPU VLN server."""
 
-    def __init__(self, base_url: Optional[str] = None, timeout_s: float = 0.80) -> None:
+    def __init__(self, base_url: Optional[str] = None, timeout_s: float = 2.0) -> None:
         raw_url = (base_url if base_url is not None else os.getenv("VLN_REMOTE_URL", "")).strip()
         self.base_url: str = raw_url.rstrip("/")
         self.timeout_s: float = timeout_s
+        is_local = ("127.0.0.1" in self.base_url) or ("localhost" in self.base_url)
+        self._client = httpx.Client(timeout=self.timeout_s, trust_env=not is_local)
 
     @property
     def enabled(self) -> bool:
         return bool(self.base_url)
 
     def _post_json(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        req = urllib.request.Request(
-            f"{self.base_url}{path}",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+        resp = self._client.post(f"{self.base_url}{path}", json=payload)
+        resp.raise_for_status()
+        return resp.json()
 
     def health(self) -> Dict[str, Any]:
-        with urllib.request.urlopen(f"{self.base_url}/health", timeout=self.timeout_s) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+        resp = self._client.get(f"{self.base_url}/health")
+        resp.raise_for_status()
+        return resp.json()
 
     def load(self) -> Optional[Dict[str, Any]]:
         if not self.enabled:

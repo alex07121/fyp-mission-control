@@ -12,9 +12,15 @@ from backend.modules.remote_vln_client import RemoteVLNClient
 
 def main() -> None:
     url = os.getenv("VLN_REMOTE_URL", "http://127.0.0.1:9001")
-    client = RemoteVLNClient(base_url=url, timeout_s=2.0)
+    client = RemoteVLNClient(base_url=url, timeout_s=6.0)
     print(f"[1/3] Probing RustDesk TCP Tunnel -> {url}/health ...")
-    info = client.health()
+    try:
+        info = client.health()
+    except Exception as exc:
+        print(f"\n[!] 隧道探测失败 ({type(exc).__name__}: {exc})！")
+        print("    建议使用零断流 Cloudflare 隧道（在学校 Ubuntu 新开一个终端执行）：")
+        print("    curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared && chmod +x cloudflared && ./cloudflared tunnel --url http://127.0.0.1:9001")
+        raise SystemExit(1)
     print(f"      Connected! Host={info.get('hostname')} | GPU={info.get('gpu_name')} ({info.get('vram_total_gb')} GB)")
 
     print("[2/3] Loading VLN policy on remote GPU ...")
