@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FYP Mission Control — Embodied BCI · VLN · YOLOE · VLA</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <!-- Sticky Top Emergency Bar -->
+  <header class="topbar" id="topbar">
+    <div class="brand">
+      <span class="status-dot" id="connDot"></span>
+      <div>
+        <h1>FYP MISSION CONTROL</h1>
+        <p class="subtitle">XLeRobot + Dual SO-ARM101 · BCI → Gemini 3.5 Flash-Lite → Light-VLN → YOLOE → VLA</p>
+      </div>
+    </div>
+
+    <div class="estop-zone">
+      <div class="gate-badge" id="gateBadge">GATEKEEPER: UNLOCKED (Blocked: 0)</div>
+      <button class="btn-estop" id="btnEstop" title="Shortcut: SPACEBAR">
+        ⛔ 一键硬急停 E-STOP [SPACE]
+      </button>
+      <button class="btn-reset" id="btnResetEstop">
+        解除急停 Reset
+      </button>
+    </div>
+  </header>
+
+  <!-- FSM Pipeline Strip + 12GB VRAM Meter -->
+  <section class="pipeline-bar">
+    <div class="fsm-track" id="fsmTrack">
+      <div class="fsm-node active" data-state="IDLE">1. IDLE</div>
+      <span class="fsm-arrow">→</span>
+      <div class="fsm-node" data-state="AGENT_PARSE">2. AGENT_PARSE</div>
+      <span class="fsm-arrow">→</span>
+      <div class="fsm-node" data-state="VLN_CRUISE">3. VLN_CRUISE</div>
+      <span class="fsm-arrow">→</span>
+      <div class="fsm-node" data-state="YOLO_LAST_MILE">4. YOLO_LAST_MILE</div>
+      <span class="fsm-arrow">→</span>
+      <div class="fsm-node" data-state="VRAM_SWAP_AND_VLA">5. VRAM_SWAP &amp; VLA</div>
+    </div>
+
+    <div class="vram-box">
+      <div class="vram-header">
+        <span>RTX 5070 Laptop VRAM (<b id="vramModels">YOLOE-26s-seg</b>)</span>
+        <span id="vramText">1.40 / 12.0 GB (Peak 1.40 GB)</span>
+      </div>
+      <div class="vram-bar-bg">
+        <div class="vram-bar-fill" id="vramFill" style="width: 11.7%"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Main 3-Column Mission Control Grid -->
+  <main class="grid-main">
+    <!-- Column 1: Live RGB-D Vision & Lens Calibrator -->
+    <section class="card">
+      <div class="card-header">
+        <h2>📷 视觉与深度标定器 (YOLOE + RGB-D)</h2>
+        <span class="badge" id="visionBackendBadge">builtin_open_vocab</span>
+      </div>
+
+      <div class="video-wrap">
+        <img id="camFeed" src="/api/camera/snapshot.jpg" alt="Robot RGB-D HUD Feed" />
+      </div>
+
+      <div class="telemetry-row">
+        <div>深度读数: <b id="valDepth">-- m</b></div>
+        <div>偏航误差: <b id="valYaw">0.0°</b></div>
+        <div>转向提示: <b id="valSteer">STRAIGHT</b></div>
+        <div>位姿: <b id="valPose">(0.00, 0.00, 0°)</b></div>
+      </div>
+
+      <div class="control-group">
+        <label class="group-title">深度相机硬件档位一键切换</label>
+        <div class="btn-toggle-row">
+          <button class="btn-opt active" id="btnLens80">当前 80cm 镜头 (0.85m 刹停 + 盲区防御)</button>
+          <button class="btn-opt" id="btnLens20">升级 20cm 新镜头 (0.45m 直停)</button>
+        </div>
+        <label class="checkbox-row">
+          <input type="checkbox" id="chkBlindWalk" />
+          <span>开启「80cm 模式末端定速盲走补齐 40cm」(0.85m 停稳后低速直走 40cm)</span>
+        </label>
+      </div>
+
+      <div class="control-group">
+        <label class="group-title">开放词汇检测类别 (.set_classes) &amp; 仿真位姿场景复位</label>
+        <div class="input-row">
+          <input type="text" id="inpPrompts" value="red mug, mug, cup" placeholder="逗号分隔类别词..." />
+          <button class="btn-secondary" id="btnSetPrompts">更新词表</button>
+        </div>
+        <div class="scenario-row">
+          <button class="btn-mini" data-scenario="default">复位起点 (2.0m)</button>
+          <button class="btn-mini" data-scenario="near_blind_06m">0.6m 近距盲区位</button>
+          <button class="btn-mini" data-scenario="doorway_front">敞开门口正前</button>
+          <button class="btn-mini" data-scenario="far_search">偏航寻路位</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Column 2: SSVEP BCI Panel + Cloud Agent & Watchdog -->
+    <section class="card">
+      <div class="card-header">
+        <h2>🧠 5 选项 SSVEP BCI 触发器 &amp; 双协议网关</h2>
+        <span class="badge" id="udpPortBadge">UDP :9999</span>
+      </div>
+
+      <div class="ssvep-grid" id="ssvepGrid">
+        <button class="ssvep-btn" data-opt="1"><span class="freq">8.0 Hz</span><b>#1 抓红色水杯</b></button>
+        <button class="ssvep-btn" data-opt="2"><span class="freq">10.0 Hz</span><b>#2 抓蓝色水瓶</b></button>
+        <button class="ssvep-btn" data-opt="3"><span class="freq">12.0 Hz</span><b>#3 前往敞开门口</b></button>
+        <button class="ssvep-btn" data-opt="4"><span class="freq">14.0 Hz</span><b>#4 经门口拿水杯</b></button>
+        <button class="ssvep-btn danger" data-opt="5"><span class="freq">15.0 Hz</span><b>#5 BCI 紧急急停</b></button>
+      </div>
+
+      <div class="input-row" style="margin-top:8px;">
+        <input type="text" id="inpManualCmd" placeholder="输入自然语言任务指令 (如: 去桌边拿水瓶)..." />
+        <button class="btn-primary" id="btnSendManual">发送任务</button>
+      </div>
+      <div class="manual-feedback" id="manualFeedback" role="status" aria-live="polite"></div>
+
+      <hr class="sep" />
+
+      <div class="card-header">
+        <h2>⚡ 云端极速 Agent 调试台 &amp; 2.5s 看门狗</h2>
+        <span class="badge" id="watchdogBadge">Watchdog Trips: 0</span>
+      </div>
+
+      <div class="agent-metrics">
+        <div>压缩体积: <b id="agKb">-- KB</b></div>
+        <div>解析方向: <b id="agDir">--</b></div>
+        <div>端到端耗时: <b id="agMs">-- ms</b></div>
+        <div>VLN早停驳回: <b id="vlnRejCount">0</b></div>
+      </div>
+
+      <div class="control-group">
+        <div class="slider-row">
+          <label>Agent 模式:</label>
+          <select id="selAgentMode">
+            <option value="auto">Auto (Vertex AI 优先)</option>
+            <option value="cloud">Cloud (强制 Vertex AI)</option>
+            <option value="mock">Mock (本地极速仿真)</option>
+          </select>
+          <label>VLA:</label>
+          <select id="selVlaModel">
+            <option value="SmolVLA">SmolVLA (6.4GB)</option>
+            <option value="pi0.5">π0.5 (7.2GB)</option>
+          </select>
+          <button class="btn-primary" id="btnBenchAgent">单次抓拍测速</button>
+        </div>
+
+        <div class="slider-row">
+          <label>巡航速度: <b id="lblSpeed">0.18</b> m/s</label>
+          <input type="range" id="rngSpeed" min="0.10" max="0.32" step="0.02" value="0.18" />
+          <label>看图间隔: <b id="lblInterval">1.5</b> s</label>
+          <input type="range" id="rngInterval" min="1.0" max="3.0" step="0.25" value="1.5" />
+        </div>
+      </div>
+
+      <div class="control-group fault-panel">
+        <div class="card-header">
+          <label class="group-title">🛡️ 安全防御与故障注入演练台 (Watchdog / 盲区毒化测试)</label>
+          <span class="badge" id="faultStatusBadge">FAULTS: NONE</span>
+        </div>
+        <div class="scenario-row">
+          <select id="selDepthFault">
+            <option value="none">深度正常 (含物理近距盲区)</option>
+            <option value="all_zero">注入: 深度全 0 毒化</option>
+            <option value="all_nan">注入: 深度全 NaN 毒化</option>
+            <option value="penetrate_4m">注入: 4.0m 远景穿透毒化</option>
+          </select>
+          <button class="btn-mini warn" id="btnTestSlowAgent">模拟 5s 超时测看门狗</button>
+          <button class="btn-mini" id="btnClearFaults">清除所有故障注入</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Column 3: Data Logger, Academic Exporter & Live Event Logs -->
+    <section class="card">
+      <div class="card-header">
+        <h2>📊 论文与汇报数据记录仪 (Exporter)</h2>
+        <div class="export-btns">
+          <a class="btn-mini primary-link" href="/api/logs/export/csv" download="fyp_mission_logs.csv">导出 CSV</a>
+          <a class="btn-mini primary-link" href="/api/logs/export/png" download="fyp_mission_report.png">导出 PNG</a>
+          <a class="btn-mini primary-link" href="/api/logs/export/svg" download="fyp_mission_report.svg">导出 SVG</a>
+        </div>
+      </div>
+
+      <div class="stats-cards">
+        <div class="stat-item"><span>总实验次数</span><b id="stTotal">0</b></div>
+        <div class="stat-item"><span>任务成功率</span><b id="stRate">0%</b></div>
+        <div class="stat-item"><span>Agent 均耗</span><b id="stLat">0 ms</b></div>
+        <div class="stat-item"><span>平均停车距</span><b id="stStop">0.00 m</b></div>
+      </div>
+
+      <div class="table-wrap">
+        <table class="log-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>指令</th>
+              <th>镜头</th>
+              <th>停车距</th>
+              <th>峰值显存</th>
+              <th>结果 / 原因</th>
+            </tr>
+          </thead>
+          <tbody id="runsTbody">
+            <tr><td colspan="6" class="muted">暂无任务记录，点击左侧 BCI 选项启动闭环实验</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="dual-logs">
+        <div>
+          <h3>实时状态机与防御事件流</h3>
+          <div class="console-box" id="fsmConsole"></div>
+        </div>
+        <div>
+          <h3>BCI 双协议接收日志 (HTTP/UDP)</h3>
+          <div class="console-box" id="bciConsole"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
