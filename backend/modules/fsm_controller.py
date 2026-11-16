@@ -584,8 +584,10 @@ class FSMController:
                             return
 
                         vln_step = self.adapter.step_vln(command, agent_direction_hint=shared_dir["hint"])
+                        premature_stop_rejected = False
                         if vln_step.get("arrived"):
                             if meas.median_depth_m is None or meas.median_depth_m > (stop_thresh + 0.08):
+                                premature_stop_rejected = True
                                 with self._lock:
                                     self._vln_rejections_current += 1
                                 d_str = f"{meas.median_depth_m:.2f}m" if meas.median_depth_m else "unknown"
@@ -611,6 +613,15 @@ class FSMController:
 
                         step_wz = float(vln_step.get("wz", 0.0))
                         step_vx_raw = float(vln_step.get("vx", self.cruise_speed_mps))
+                        # Real LightNav-0 outputs all-zero waypoint chunk (vx=0, wz=0) when claiming arrived=True;
+                        # when our RGB-D guard rejects that premature STOP, keep advancing gently toward Cloud/YOLOE heading!
+                        if premature_stop_rejected and step_vx_raw <= 1e-4:
+                            step_vx_raw = self.cruise_speed_mps
+                            if abs(step_wz) <= 1e-4:
+                                if meas.detected:
+                                    step_wz = max(-0.45, min(0.45, -0.025 * meas.yaw_error_deg))
+                                else:
+                                    step_wz = {"LEFT": 0.22, "RIGHT": -0.22}.get(shared_dir["hint"], 0.0)
                         # R3-HIGH-04 + R4-MED-02: Clamp forward linear velocity to 0.0 when within `stop_thresh + 0.05`
                         # OR whenever heading error exceeds 14.0 deg (rotate in place before translating forward)!
                         if (
