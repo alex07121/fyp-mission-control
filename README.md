@@ -29,16 +29,17 @@ Run the 17-line dual-protocol demo while the server is running:
 .venv/bin/python bci_sender_example.py
 ```
 
-## 3. 100% School 32GB GPU Compute Hub (`ubuntu@324` — RTX 5000 Ada 32GB)
+## 3. Dynamic 32GB School GPU Slot Scheduler (`ubuntu@324` — RTX 5000 Ada 32GB)
 
-Offloads **all 4 AI stages** (`Ollama qwen3-vl:4b-instruct` + `LightNav-0` + `YOLOE-26s-seg` + `VLA`) onto the school `RTX 5000 Ada 32GB` server while keeping the Mac / robot edge host as a zero-GPU thin I/O client:
+Maximizes the school `RTX 5000 Ada 32GB` via **Resident Brain + `<1s` CPU-RAM Sleep/Wake Specialists**:
+- **Resident Slot (`24/7` Hot)**: `qwen3-vl:8b-instruct` (auto-selected, `num_ctx=4096`, `keep_alive=-1`) + `YOLOE-26s-seg` (`~7.5 GB`); auto-evicts `27b+` models at startup.
+- **Dynamic Slot A (Driving)**: `LightNav-0` (`gpu_util=0.50`, `~15.7 GB`) wakes on navigation and sleeps to pinned CPU RAM (`vLLM sleep level=1`) on arrival.
+- **Dynamic Slot B (Grasping)**: `ACT` / `TurboVLA` / `SmolVLA` / full `bf16 pi0.5` wakes after braking (auto-sleeping `LightNav-0` first) and sleeps back to CPU RAM after grasp.
 
 1. **On School Server (`ubuntu@324`)**:
    ```bash
-   ollama stop qwen3.8:27b || true
-   conda activate lightnav
-   git pull
-   python remote_vln_server.py
+   ollama pull qwen3-vl:8b-instruct  # optional one-time upgrade from 4b -> 8b
+   conda activate lightnav && git pull && python remote_vln_server.py
    ```
 2. **On Local Mac / Car Edge Client** (bypasses Clash proxy automatically for `127.0.0.1` and Tailscale `100.*`):
    ```bash

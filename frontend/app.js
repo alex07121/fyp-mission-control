@@ -337,7 +337,10 @@
         }
       });
 
-      // 12GB VRAM Bar
+      // Dynamic 12GB / 32GB School GPU Slot VRAM Bar
+      if ($("vramTitleLabel")) {
+        $("vramTitleLabel").textContent = s.vram.total_gb > 16.0 ? "School RTX 5000 32GB Slot" : "RTX 5070 Laptop VRAM";
+      }
       $("vramModels").textContent = s.vram.active_models.join(" + ");
       $("vramText").textContent = `${s.vram.allocated_gb.toFixed(2)} / ${s.vram.total_gb.toFixed(1)} GB (Peak ${s.vram.peak_gb.toFixed(2)} GB)`;
       $("vramFill").style.width = `${Math.min(100, s.vram.utilization_pct)}%`;

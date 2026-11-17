@@ -554,6 +554,8 @@ class XLeRobotRealAdapter(RobotAdapter):
 
     def load_vla(self, model_name: str = "SmolVLA") -> VRAMStatus:
         is_estop = self.estop_active
+        if self._remote_vln.enabled:
+            self._remote_vln.load_vla(model_name=model_name)
         with self._state_lock:
             if not is_estop:
                 self._arm_abort_flag = False
@@ -580,6 +582,8 @@ class XLeRobotRealAdapter(RobotAdapter):
         return {"success": True, "aborted": False, "model": model_name}
 
     def unload_vla(self) -> VRAMStatus:
+        if self._remote_vln.enabled:
+            self._remote_vln.unload_vla(hard_unload=False)
         with self._state_lock:
             self._vla_model = None
         gc.collect()
@@ -605,6 +609,22 @@ class XLeRobotRealAdapter(RobotAdapter):
         return self.get_vram_status()
 
     def get_vram_status(self) -> VRAMStatus:
+        if self._remote_vln.enabled:
+            tel = self._remote_vln.last_gpu_telemetry
+            if tel and float(tel.get("vram_total_gb", 0.0)) > 0.0:
+                r_alloc = round(float(tel.get("vram_allocated_gb", 0.0)), 2)
+                r_total = round(float(tel.get("vram_total_gb", 31.5)), 2)
+                r_peak = round(max(self._peak_vram_gb, float(tel.get("peak_vram_gb", r_alloc)), r_alloc), 2)
+                self._peak_vram_gb = r_peak
+                r_models = list(tel.get("active_models") or ["School-32GB-Hub"])
+                return VRAMStatus(
+                    allocated_gb=r_alloc,
+                    total_gb=r_total,
+                    peak_gb=r_peak,
+                    active_models=r_models,
+                    vram_violation=(r_alloc >= r_total or r_peak >= r_total),
+                )
+
         with self._state_lock:
             models: List[str] = ["YOLOE-26s-seg"]
             sim_alloc = 1.4

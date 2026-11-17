@@ -56,6 +56,17 @@ class RemoteVLNClient:
         self._last_rpc_mono: float = 0.0
         self._cached_step: Optional[Dict[str, Any]] = None
         self._force_next_reset: bool = True
+        self._last_gpu_telemetry: Optional[Dict[str, Any]] = None
+
+    @property
+    def last_gpu_telemetry(self) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            return dict(self._last_gpu_telemetry) if self._last_gpu_telemetry is not None else None
+
+    def _record_telemetry(self, data: Any) -> None:
+        if isinstance(data, dict) and ("vram_total_gb" in data or "vln_slot_state" in data):
+            with self._lock:
+                self._last_gpu_telemetry = data
 
     def _get_http(self) -> "httpx.Client":
         if self._client is None:
@@ -76,12 +87,16 @@ class RemoteVLNClient:
             timeout=timeout_override if timeout_override is not None else self.timeout_s,
         )
         resp.raise_for_status()
-        return resp.json()
+        out = resp.json()
+        self._record_telemetry(out)
+        return out
 
     def health(self) -> Dict[str, Any]:
         resp = self._get_http().get(f"{self.base_url}/health")
         resp.raise_for_status()
-        return resp.json()
+        out = resp.json()
+        self._record_telemetry(out)
+        return out
 
     # ---------------- 1. School Ollama VLM (`qwen3-vl:4b-instruct`) ----------------
     def ask_agent_vlm(
@@ -198,7 +213,16 @@ class RemoteVLNClient:
         except Exception:
             return None
 
-    # ---------------- 4. School VLA Manipulation Policy ----------------
+    # ---------------- 4. School VLA Manipulation Policy (Dynamic Slot B) ----------------
+    def load_vla(self, model_name: str = "SmolVLA") -> Optional[Dict[str, Any]]:
+        if not self.enabled:
+            return None
+        try:
+            return self._post_json("/vla/load", {"model_name": model_name}, timeout_override=6.0)
+        except Exception as exc:
+            logger.warning("School GPU /vla/load failed (%s): %s", self.base_url, exc)
+            return None
+
     def act_vla(
         self,
         model_name: str,
@@ -226,4 +250,13 @@ class RemoteVLNClient:
             )
         except Exception as exc:
             logger.warning("School GPU /vla/act failed (%s): %s", self.base_url, exc)
+            return None
+
+    def unload_vla(self, hard_unload: bool = False) -> Optional[Dict[str, Any]]:
+        if not self.enabled:
+            return None
+        try:
+            return self._post_json("/vla/unload", {"hard_unload": hard_unload}, timeout_override=4.0)
+        except Exception as exc:
+            logger.warning("School GPU /vla/unload failed (%s): %s", self.base_url, exc)
             return None
