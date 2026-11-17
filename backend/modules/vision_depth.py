@@ -78,6 +78,7 @@ class VisionDepthCalibrator:
         self._last_valid_depth_m: Optional[float] = None
         self._min_approached_depth_m: Optional[float] = None
         self._last_measurement: Optional[DetectionMeasurement] = None
+        self._school_hub_cache: Dict[str, Any] = {}
         self._try_load_local_yoloe()
 
     @staticmethod
@@ -241,6 +242,26 @@ class VisionDepthCalibrator:
                     return None
                 except Exception as exc:
                     logger.warning("YOLOE inference fallback: %s", exc)
+
+        # Remote School 32GB GPU YOLOE inference when running in real mode without local weights
+        school_url = (os.getenv("SCHOOL_GPU_URL") or os.getenv("VLN_REMOTE_URL") or "").strip().rstrip("/")
+        if school_url and os.getenv("ROBOT_MODE", "").strip().lower() == "real":
+            from backend.modules.remote_vln_client import RemoteVLNClient
+
+            with self._model_lock:
+                hub = self._school_hub_cache.get(school_url)
+                if hub is None:
+                    hub = RemoteVLNClient(base_url=school_url, timeout_s=1.2)
+                    self._school_hub_cache[school_url] = hub
+            s_det = hub.detect_yoloe(bgr, prompts)
+            if s_det and s_det.get("ok"):
+                with self._lock:
+                    self._detector_backend = "school_gpu_yoloe_26s"
+                if s_det.get("detected") and s_det.get("bbox"):
+                    bx = s_det["bbox"]
+                    return str(s_det["label"]), float(s_det["confidence"]), (int(bx[0]), int(bx[1]), int(bx[2]), int(bx[3]))
+                return None
+
         return self._detect_builtin(bgr, prompts)
 
     def analyze_frame(

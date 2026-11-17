@@ -6,6 +6,7 @@ import collections
 import json
 import logging
 import math
+import os
 import re
 import threading
 import time
@@ -169,7 +170,8 @@ class CloudAgentEngine:
     ) -> None:
         self._brake_cb = emergency_brake_cb
         self._lock = threading.RLock()
-        self.mode: str = default_mode if default_mode in {"cloud", "mock", "auto"} else "cloud"
+        self.mode: str = default_mode if default_mode in {"cloud", "mock", "auto", "school"} else "cloud"
+        self._school_hub_cache: Dict[str, Any] = {}
         self._watchdog_timeout_s: float = self.MAX_WATCHDOG_TIMEOUT_S
         self.watchdog_timeout_s = watchdog_timeout_s
 
@@ -409,6 +411,29 @@ class CloudAgentEngine:
 
         if effective_mode == "mock":
             return self._mock_infer(bgr_frame, prompt), "mock_local"
+
+        # Route Agent VLM inference to School 32GB GPU (`qwen3-vl:4b-instruct`) whenever SCHOOL_GPU_URL / VLN_REMOTE_URL is set!
+        school_url = (os.getenv("SCHOOL_GPU_URL") or os.getenv("VLN_REMOTE_URL") or "").strip().rstrip("/")
+        if school_url and effective_mode in ("auto", "school"):
+            from backend.modules.remote_vln_client import RemoteVLNClient
+
+            with self._client_lock:
+                hub = self._school_hub_cache.get(school_url)
+                if hub is None:
+                    hub = RemoteVLNClient(base_url=school_url, timeout_s=2.2)
+                    self._school_hub_cache[school_url] = hub
+            q_school = (
+                f"Task: {prompt}. Look at this robot camera view. "
+                "Should the robot steer LEFT, STRAIGHT, or RIGHT toward the target? "
+                'Reply ONLY JSON: {"direction": "LEFT"} or {"direction": "STRAIGHT"} or {"direction": "RIGHT"}.'
+            )
+            s_out = hub.ask_agent_vlm(jpeg_bytes, q_school, expect_json=True, max_tokens=32, timeout_s=2.2)
+            if s_out.get("ok") and s_out.get("text"):
+                return str(s_out["text"]).strip(), str(s_out.get("model", "school_gpu_vlm"))
+            if effective_mode == "school":
+                raise RuntimeError(s_out.get("error", "School GPU VLM failed"))
+        elif effective_mode == "school" and not school_url:
+            raise RuntimeError("SCHOOL_GPU_URL is not set for school agent mode")
 
         try:
             client, types = self._get_vertex_client()

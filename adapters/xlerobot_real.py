@@ -13,12 +13,14 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import json
 import logging
 import math
 import os
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -54,11 +56,27 @@ class _BLECarBridge:
         self._target_vx: float = 0.0
         self._target_wz: float = 0.0
         self._last_cmd_mono: float = 0.0
+        self._pulse_req: Optional[Tuple[str, float, threading.Event]] = None
         self._force_stop_evt = threading.Event()
         self._shutdown_evt = threading.Event()
         self._last_ble_sent: str = "stop"
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread = threading.Thread(target=self._thread_main, name="BLECarBridge", daemon=True)
         self._thread.start()
+
+    def execute_pulse_blocking(self, direction: str, pulse_ms: int, abort_fn: Callable[[], bool]) -> bool:
+        """Execute an exact-millisecond single BLE pulse (`ONC`/`OND` -> `ONF`), interruptible in <20ms."""
+        done_evt = threading.Event()
+        with self._lock:
+            self._target_vx = 0.0
+            self._target_wz = 0.0
+            self._pulse_req = (direction, max(0.05, pulse_ms / 1000.0), done_evt)
+        deadline = time.monotonic() + (pulse_ms / 1000.0) + 1.0
+        while not done_evt.wait(0.02):
+            if abort_fn() or time.monotonic() > deadline:
+                self.emergency_stop()
+                return False
+        return not abort_fn()
 
     def set_velocity(self, vx: float, wz: float) -> None:
         with self._lock:
@@ -95,7 +113,7 @@ class _BLECarBridge:
             return
         await client.write_gatt_char(BLE_WRITE_UUID, BLE_COMMANDS[cmd_name], response=False)
         self._last_ble_sent = cmd_name
-        logger.debug("[BLE TX] %s (%s)", BLE_COMMANDS[cmd_name].decode("ascii"), cmd_name)
+        logger.info("[BLE TX] %s (%s)", BLE_COMMANDS[cmd_name].decode("ascii"), cmd_name)
 
     async def _ble_loop(self) -> None:
         try:
@@ -127,8 +145,31 @@ class _BLECarBridge:
                 while not self._shutdown_evt.is_set() and client.is_connected:
                     if self._force_stop_evt.is_set():
                         self._force_stop_evt.clear()
+                        with self._lock:
+                            if self._pulse_req is not None:
+                                self._pulse_req[2].set()
+                                self._pulse_req = None
                         await self._send_raw(client, "stop", force=True)
                         await asyncio.sleep(0.03)
+                        continue
+
+                    p_req = None
+                    with self._lock:
+                        if self._pulse_req is not None:
+                            p_req = self._pulse_req
+                            self._pulse_req = None
+                    if p_req is not None:
+                        p_dir, p_dur, p_evt = p_req
+                        try:
+                            await self._send_raw(client, p_dir, force=True)
+                            end_p = time.monotonic() + p_dur
+                            while time.monotonic() < end_p:
+                                if self._force_stop_evt.is_set() or self._shutdown_evt.is_set():
+                                    break
+                                await asyncio.sleep(0.015)
+                            await self._send_raw(client, "stop", force=True)
+                        finally:
+                            p_evt.set()
                         continue
 
                     now = time.monotonic()
@@ -203,11 +244,16 @@ class _USBCameraReader:
         self._stop_evt.set()
         self._thread.join(timeout=1.5)
 
+    def set_preferred_index(self, idx: int) -> None:
+        with self._lock:
+            self._preferred_index = idx
+            self._reopen_requested = True
+
     def _open_best_camera(self) -> Optional[cv2.VideoCapture]:
         candidates = (
             [self._preferred_index]
             if self._preferred_index is not None
-            else [1, 0, 2]  # On MacBook, index 1 or 0 is typically external USB FHD Camera
+            else [0, 1, 2]  # Cam 0 is confirmed Car USB FHD Camera
         )
         for idx in candidates:
             if idx is None or idx < 0:
@@ -228,6 +274,11 @@ class _USBCameraReader:
     def _capture_loop(self) -> None:
         cap: Optional[cv2.VideoCapture] = None
         while not self._stop_evt.is_set():
+            if getattr(self, "_reopen_requested", False):
+                self._reopen_requested = False
+                if cap is not None:
+                    cap.release()
+                    cap = None
             if cap is None or not cap.isOpened():
                 cap = self._open_best_camera()
                 if cap is None:
@@ -271,8 +322,8 @@ class XLeRobotRealAdapter(RobotAdapter):
 
         # Activate real hardware threads ONLY when ROBOT_MODE=real (keeps fast offline unit tests isolated)
         live_hw = os.getenv("ROBOT_MODE", "").strip().lower() == "real"
-        cam_env = os.getenv("CAMERA_INDEX", "").strip()
-        cam_idx = int(cam_env) if cam_env.isdigit() else None
+        cam_env = os.getenv("CAMERA_INDEX", "0").strip()
+        cam_idx = int(cam_env) if cam_env.isdigit() else 0
         self._cam: Optional[_USBCameraReader] = _USBCameraReader(cam_idx) if live_hw else None
         self._ble: Optional[_BLECarBridge] = (
             _BLECarBridge(
@@ -282,7 +333,119 @@ class XLeRobotRealAdapter(RobotAdapter):
             if live_hw
             else None
         )
-        logger.info("XLeRobotRealAdapter initialized (live_hw=%s, remote_vln=%s).", live_hw, self._remote_vln.base_url)
+        logger.info("XLeRobotRealAdapter initialized (live_hw=%s, cam=%s, remote_vln=%s).", live_hw, cam_idx, self._remote_vln.base_url)
+
+    @property
+    def active_camera_index(self) -> int:
+        return self._cam._active_index if self._cam is not None else 0
+
+    def set_camera_index(self, idx: int) -> None:
+        if self._cam is not None:
+            self._cam.set_preferred_index(int(idx))
+
+    def turn_in_place_deg(self, deg: float, expected_estop_epoch: Optional[int] = None) -> bool:
+        """
+        Closed-loop short-pulse BLE turn using calibrated Cam 0 ORB visual odometry (`data/car_calibration.json`).
+        Breaks turns into <=22° short pulses (preventing DC motor high-RPM runaway) and corrects residual error!
+        """
+        if abs(deg) < 2.5:
+            return True
+
+        hfov_deg = 115.0
+        ms_per_deg = 16.7
+        try:
+            cp = Path(__file__).resolve().parent.parent / "data" / "car_calibration.json"
+            if cp.exists():
+                cdata = json.loads(cp.read_text(encoding="utf-8"))
+                hfov_deg = float(cdata.get("true_camera_hfov_deg", hfov_deg))
+                ms_per_deg = float(cdata.get("pulse_ms_per_deg", ms_per_deg))
+        except Exception:
+            pass
+
+        def _is_aborted() -> bool:
+            return self.estop_active or (expected_estop_epoch is not None and self.estop_epoch != expected_estop_epoch)
+
+        def _measure_orb_deg(b_img: Optional[np.ndarray], a_img: Optional[np.ndarray]) -> Optional[float]:
+            if b_img is None or a_img is None:
+                return None
+            g1 = cv2.cvtColor(b_img, cv2.COLOR_BGR2GRAY)
+            g2 = cv2.cvtColor(a_img, cv2.COLOR_BGR2GRAY)
+            orb = cv2.ORB_create(1500)
+            k1, d1 = orb.detectAndCompute(g1, None)
+            k2, d2 = orb.detectAndCompute(g2, None)
+            if d1 is None or d2 is None or len(k1) < 20 or len(k2) < 20:
+                return None
+            matches = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True).match(d1, d2)
+            if len(matches) < 15:
+                return None
+            p1 = np.float32([k1[m.queryIdx].pt for m in matches])
+            p2 = np.float32([k2[m.trainIdx].pt for m in matches])
+            _, inl = cv2.estimateAffinePartial2D(p1, p2, method=cv2.RANSAC, ransacReprojThreshold=4.5)
+            if inl is None or int(inl.sum()) < 12:
+                return None
+            keep = inl.ravel().astype(bool)
+            cx = float(g1.shape[1]) / 2.0
+            fx = cx / math.tan(math.radians(hfov_deg) / 2.0)
+            a1 = np.degrees(np.arctan((p1[keep, 0] - cx) / fx))
+            a2 = np.degrees(np.arctan((p2[keep, 0] - cx) / fx))
+            return float(np.median(a2 - a1))
+
+        if self._ble is None or not self._ble.connected:
+            return False
+
+        turned = 0.0
+        before = self._cam.get_latest_bgr() if self._cam is not None else None
+        for _ in range(14):
+            if _is_aborted():
+                self.stop()
+                return False
+            rem = deg - turned
+            if abs(rem) <= 3.5:
+                break
+            sub = max(-22.0, min(22.0, rem))
+            p_ms = int(round(max(75.0, min(260.0, abs(sub) * ms_per_deg))))
+            ok = self._ble.execute_pulse_blocking("left" if sub > 0 else "right", p_ms, _is_aborted)
+            if not ok:
+                self.stop()
+                return False
+            time.sleep(0.28)
+            after = self._cam.get_latest_bgr() if self._cam is not None else None
+            meas = _measure_orb_deg(before, after)
+            if meas is not None and abs(meas) >= 1.5 and (meas > 0) == (sub > 0):
+                turned += meas
+            else:
+                turned += sub
+            before = after
+
+        with self._state_lock:
+            nt = math.atan2(
+                math.sin(self._pose.theta + math.radians(turned)),
+                math.cos(self._pose.theta + math.radians(turned)),
+            )
+            self._pose = Pose2D(self._pose.x, self._pose.y, nt)
+        self.stop()
+        logger.info("[TURN] Commanded %+.1f° -> Actual %+.1f°", deg, turned)
+        return True
+
+    def drive_pulse_ms(self, direction: str, pulse_ms: int, expected_estop_epoch: Optional[int] = None) -> bool:
+        """Execute one clean discrete forward/backward/left/right BLE pulse then stop (matches vln_car.py)."""
+        if pulse_ms <= 0 or direction not in ("forward", "backward", "left", "right"):
+            return True
+
+        def _is_aborted() -> bool:
+            return self.estop_active or (expected_estop_epoch is not None and self.estop_epoch != expected_estop_epoch)
+
+        if self._ble is None or not self._ble.connected:
+            return False
+        ok = self._ble.execute_pulse_blocking(direction, int(min(1400, max(60, pulse_ms))), _is_aborted)
+        self.stop()
+        if ok and direction in ("forward", "backward"):
+            dist = (pulse_ms / 1000.0) * FULL_LINEAR_SPEED_MPS * (1.0 if direction == "forward" else -1.0)
+            with self._state_lock:
+                nx = self._pose.x + dist * math.cos(self._pose.theta)
+                ny = self._pose.y + dist * math.sin(self._pose.theta)
+                self._pose = Pose2D(nx, ny, self._pose.theta)
+        return ok
 
     def _integrate_dead_reckoning(self) -> None:
         now = time.monotonic()
@@ -404,12 +567,15 @@ class XLeRobotRealAdapter(RobotAdapter):
         abort_check: Optional[Callable[[], bool]] = None,
         expected_estop_epoch: Optional[int] = None,
     ) -> Dict[str, Any]:
-        for _ in range(10):
+        for step_i in range(10):
             stale_epoch = expected_estop_epoch is not None and self.estop_epoch != expected_estop_epoch
             with self._state_lock:
                 aborted = self._arm_abort_flag
             if self.estop_active or stale_epoch or aborted or (abort_check and abort_check()):
                 return {"success": False, "aborted": True, "model": model_name}
+            if step_i == 0 and self._remote_vln.enabled:
+                frame = self.get_rgbd_frame()
+                self._remote_vln.act_vla(model_name=model_name, instruction=instruction, front_bgr=frame.rgb)
             time.sleep(0.05)
         return {"success": True, "aborted": False, "model": model_name}
 

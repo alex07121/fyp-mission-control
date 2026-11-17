@@ -1,0 +1,81 @@
+{
+  "updated_at": "2026-11-16 15:49:17",
+  "true_camera_hfov_deg": 115.0,
+  "pulse_ms_per_deg": 16.726,
+  "deg_per_200ms_pulse": 11.96,
+  "pulse_table": [
+    {
+      "pulse_ms": 100,
+      "left_deg": 0.0,
+      "right_deg": -6.652158737182617,
+      "avg_deg": 6.65,
+      "ms_per_deg": 15.03
+    },
+    {
+      "pulse_ms": 150,
+      "left_deg": 6.182121276855469,
+      "right_deg": -13.136058807373047,
+      "avg_deg": 9.66,
+      "ms_per_deg": 15.53
+    },
+    {
+      "pulse_ms": 200,
+      "left_deg": 9.529067993164062,
+      "right_deg": -12.790233612060547,
+      "avg_deg": 11.16,
+      "ms_per_deg": 17.92
+    },
+    {
+      "pulse_ms": 300,
+      "left_deg": 17.255889892578125,
+      "right_deg": -18.963064193725586,
+      "avg_deg": 18.11,
+      "ms_per_deg": 16.57
+    },
+    {
+      "pulse_ms": 400,
+      "left_deg": 23.90677833557129,
+      "right_deg": -27.262985229492188,
+      "avg_deg": 25.58,
+      "ms_per_deg": 15.63
+    }
+  ],
+  "angle_verification": [
+    {
+      "command_deg": 30.0,
+      "actual_deg": 28.0,
+      "error_deg": -2.0,
+      "pulses": 3
+    },
+    {
+      "command_deg": -30.0,
+      "actual_deg": -29.28,
+      "error_deg": 0.72,
+      "pulses": 3
+    },
+    {
+      "command_deg": 45.0,
+      "actual_deg": 44.72,
+      "error_deg": -0.28,
+      "pulses": 5
+    },
+    {
+      "command_deg": -45.0,
+      "actual_deg": -46.81,
+      "error_deg": -1.81,
+      "pulses": 5
+    },
+    {
+      "command_deg": 90.0,
+      "actual_deg": 87.21,
+      "error_deg": -2.79,
+      "pulses": 11
+    },
+    {
+      "command_deg": -90.0,
+      "actual_deg": -90.0,
+      "error_deg": 0.0,
+      "pulses": 6
+    }
+  ]
+}

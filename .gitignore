@@ -4,5 +4,6 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 data/*.sqlite3*
+data/room_memory_latest.json
 weights/*.pt
 *.bak

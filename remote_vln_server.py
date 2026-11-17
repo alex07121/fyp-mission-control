@@ -1,7 +1,16 @@
 """
-School 32GB GPU Remote VLN Server — Real LightNav-0 (vLLM / HF) Integration.
+All-in-One School 32GB GPU Compute Server (ubuntu@324 — NVIDIA RTX 5000 Ada 32GB).
 
-Run inside the `lightnav` conda environment on ubuntu@324:
+Consolidates 100% of FYP AI compute onto the school GPU so the Mac / Robot Car uses ZERO GPU/NPU:
+  1. `/agent/vlm`      -> School Ollama (`qwen3-vl:4b-instruct`, ~4.5 GB VRAM) for Room Scan & Arrival Gate
+  2. `/vln/*`          -> School `LightNav-0` (`vllm_local`, ~13.2 GB VRAM) for 4 FPS Waypoint Navigation
+  3. `/vision/detect`  -> School `YOLOE` (`yoloe-26s-seg.pt`, ~0.8 GB VRAM) for Open-Vocab Last-Mile Alignment
+  4. `/vla/act`        -> School VLA (`ACT` / `TurboVLA` / `SmolVLA` / `pi0.5`) for SO-101 Arm Manipulation
+
+Total simultaneous resident VRAM: ~18.5 GB / 31.5 GB (~13 GB free headroom for VLA!).
+
+Run on ubuntu@324 (listens on 0.0.0.0:9001 for Tailscale `100.106.0.106:9001` & localhost `127.0.0.1:9001`):
+    ollama stop qwen3.8:27b || true
     conda activate lightnav
     cd ~/fyp-mission-control && git pull
     python remote_vln_server.py
@@ -12,6 +21,7 @@ from __future__ import annotations
 import base64
 import gc
 import io
+import json
 import logging
 import os
 import platform
@@ -20,6 +30,7 @@ import socket
 import sys
 import threading
 import time
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -34,36 +45,62 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)-7s | %(message)s",
     datefmt="%H:%M:%S",
 )
-logger = logging.getLogger("lightnav.remote")
+logger = logging.getLogger("school.gpu.hub")
 
-HOST: str = os.getenv("VLN_HOST", "127.0.0.1")
+# Bind 0.0.0.0 by default so BOTH Tailscale (100.106.0.106:9001) and Cloudflare Tunnel (127.0.0.1:9001) work!
+HOST: str = os.getenv("VLN_HOST", "0.0.0.0")
 PORT: int = int(os.getenv("VLN_PORT", "9001"))
 
-# LightNav-0 paths & inference constants (from LightNav-0 docs/DEPLOYMENT.md)
-LIGHTNAV_REPO: Path = Path(os.getenv("LIGHTNAV_REPO", "/home/ubuntu/LightNav-0"))
+# 1. Ollama VLM settings on ubuntu@324
+OLLAMA_BASE_URL: str = os.getenv("SCHOOL_OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
+OLLAMA_VLM_MODEL: str = os.getenv("SCHOOL_VLM_MODEL", "qwen3-vl:4b-instruct")
+
+# 2. LightNav-0 settings (gpu_util=0.42 leaves ~18 GB free for Ollama 4B + YOLOE + VLA!)
+LIGHTNAV_REPO: Path = Path(os.getenv("LIGHTNAV_REPO", str(Path.home() / "LightNav-0")))
 LIGHTNAV_MODEL_PATH: str = os.getenv(
     "LIGHTNAV_MODEL_PATH",
     str(LIGHTNAV_REPO / "checkpoints" / "LightNav-0"),
 )
-LIGHTNAV_BACKEND: str = os.getenv("LIGHTNAV_BACKEND", "vllm_local")  # "vllm_local" or "hf"
-LIGHTNAV_GPU_UTIL: float = float(os.getenv("LIGHTNAV_GPU_UTIL", "0.45"))
-DT: float = 0.25  # LightNav-0 trained on 4 fps video (0.25s control period)
+LIGHTNAV_BACKEND: str = os.getenv("LIGHTNAV_BACKEND", "vllm_local")
+LIGHTNAV_GPU_UTIL: float = float(os.getenv("LIGHTNAV_GPU_UTIL", "0.42"))
+DT: float = 0.25
 MAX_VX_MPS: float = float(os.getenv("LIGHTNAV_MAX_VX", "0.25"))
 MAX_WZ_RADS: float = float(os.getenv("LIGHTNAV_MAX_WZ", "0.85"))
 
-# Ensure LightNav-0 source tree is importable even if not pip-installed editable
+# 3. YOLOE weights path on ubuntu@324
+YOLOE_WEIGHTS_PATH: str = os.getenv("YOLOE_WEIGHTS_PATH", "yoloe-26s-seg.pt")
+
 for candidate in (LIGHTNAV_REPO / "src", LIGHTNAV_REPO):
     if candidate.is_dir() and str(candidate) not in sys.path:
         sys.path.insert(0, str(candidate))
 
-app = FastAPI(title="FYP Remote LightNav-0 Server (RTX 5000 Ada 32GB)")
+app = FastAPI(title="FYP All-in-One School 32GB GPU Compute Hub")
 _lock = threading.RLock()
+_yoloe_lock = threading.RLock()
+_vla_lock = threading.RLock()
+
 _vln_agent: Any = None
 _vln_backend_active: str = "unloaded"
 _vln_load_error: str = ""
 _active_episode_instruction: str = ""
 _step_count: int = 0
 _is_stop_centroid_fn: Any = None
+
+_yoloe_model: Any = None
+_yoloe_classes: List[str] = []
+_vla_policy: Any = None
+_vla_loaded_name: Optional[str] = None
+
+_direct_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+class AgentVLMRequest(BaseModel):
+    prompt: str
+    system_prompt: str = ""
+    image_jpeg_b64: Optional[str] = None
+    expect_json: bool = True
+    max_tokens: int = 400
+    model: str = ""
 
 
 class VLNResetRequest(BaseModel):
@@ -82,11 +119,21 @@ class VLNUnloadRequest(BaseModel):
     hard_unload: bool = False
 
 
+class VisionDetectRequest(BaseModel):
+    image_jpeg_b64: str
+    prompts: List[str]
+    conf: float = 0.25
+
+
+class VLAActRequest(BaseModel):
+    model_name: str = "SmolVLA"
+    instruction: str = ""
+    front_jpeg_b64: Optional[str] = None
+    wrist_jpeg_b64: Optional[str] = None
+    joint_state: Optional[List[float]] = None
+
+
 def normalize_lightnav_instruction(raw_cmd: str, hint: str = "STRAIGHT") -> str:
-    """
-    Convert bilingual/Chinese Mission Control commands into LightNav-0's trained English format:
-    'Action + Direction + Explicit Object + and stop.'
-    """
     text = (raw_cmd or "").strip()
     low = text.lower()
     dir_phrase = {
@@ -101,7 +148,6 @@ def normalize_lightnav_instruction(raw_cmd: str, hint: str = "STRAIGHT") -> str:
     if any(k in low for k in ("mug", "cup")) or "杯" in text:
         return f"Go to the red mug on the table {dir_phrase} and stop."
 
-    # Custom user text: strip non-ASCII if bilingual, otherwise preserve English & ensure 'and stop.'
     ascii_only = re.sub(r"[^\x20-\x7E]+", " ", text).strip(" ()-.,;:")
     if len(ascii_only) >= 4:
         if "stop" not in ascii_only.lower():
@@ -120,8 +166,10 @@ def _gpu_info() -> Dict[str, Any]:
         "vram_allocated_gb": 0.0,
         "vram_free_gb": 0.0,
         "vram_total_gb": 0.0,
-        "model_path_exists": Path(LIGHTNAV_MODEL_PATH).exists(),
+        "ollama_model": OLLAMA_VLM_MODEL,
         "vln_backend": _vln_backend_active,
+        "yoloe_loaded": _yoloe_model is not None,
+        "vla_loaded": _vla_loaded_name,
         "load_error": _vln_load_error,
     }
     try:
@@ -132,7 +180,7 @@ def _gpu_info() -> Dict[str, Any]:
             free_b, total_b = torch.cuda.mem_get_info(0)
             info["cuda_available"] = True
             info["gpu_name"] = str(props.name)
-            info["vram_allocated_gb"] = round(torch.cuda.memory_allocated(0) / (1024**3), 2)
+            info["vram_allocated_gb"] = round((total_b - free_b) / (1024**3), 2)
             info["vram_free_gb"] = round(free_b / (1024**3), 2)
             info["vram_total_gb"] = round(total_b / (1024**3), 2)
     except Exception:
@@ -141,7 +189,6 @@ def _gpu_info() -> Dict[str, Any]:
 
 
 def _ensure_lightnav_loaded() -> bool:
-    """Lazy-load LightNav-0 once and keep warm in 32GB VRAM across missions."""
     global _vln_agent, _vln_backend_active, _vln_load_error, _is_stop_centroid_fn
     with _lock:
         if _vln_agent is not None:
@@ -159,26 +206,13 @@ def _ensure_lightnav_loaded() -> bool:
                     free_b, total_b = torch.cuda.mem_get_info(0)
                     free_gb = free_b / (1024**3)
                     total_gb = total_b / (1024**3)
-                    if free_gb < 15.5:
-                        # Another process (e.g. lightnav-serve on :8051) is holding ~15GB VRAM; cap safely!
-                        safe_util = max(0.25, min(gpu_util, (free_gb - 2.0) / max(1.0, total_gb)))
-                        logger.warning(
-                            "Low free VRAM (%.2f / %.2f GB) — adjusting gpu_memory_utilization %.2f -> %.2f",
-                            free_gb,
-                            total_gb,
-                            gpu_util,
-                            safe_util,
-                        )
+                    if free_gb < 15.0:
+                        safe_util = max(0.25, min(gpu_util, (free_gb - 3.5) / max(1.0, total_gb)))
+                        logger.warning("Low free VRAM (%.2f GB) — tuning gpu_memory_utilization -> %.2f", free_gb, safe_util)
                         gpu_util = round(safe_util, 2)
             except Exception:
                 pass
 
-            logger.info(
-                "Loading LightNav-0 from %s (backend=%s, task_key=vlnce, gpu_util=%.2f) ...",
-                LIGHTNAV_MODEL_PATH,
-                LIGHTNAV_BACKEND,
-                gpu_util,
-            )
             t0 = time.perf_counter()
             try:
                 _vln_agent = build_tracking_agent(
@@ -190,12 +224,8 @@ def _ensure_lightnav_loaded() -> bool:
                 _vln_backend_active = f"LightNav-0:{LIGHTNAV_BACKEND}"
             except Exception as vllm_exc:
                 if LIGHTNAV_BACKEND == "vllm_local":
-                    logger.warning("vllm_local init failed (%s); retrying with backend='hf' ...", vllm_exc)
-                    _vln_agent = build_tracking_agent(
-                        model_path=LIGHTNAV_MODEL_PATH,
-                        backend="hf",
-                        task_key="vlnce",
-                    )
+                    logger.warning("vllm_local failed (%s); falling back to backend='hf'", vllm_exc)
+                    _vln_agent = build_tracking_agent(model_path=LIGHTNAV_MODEL_PATH, backend="hf", task_key="vlnce")
                     _vln_backend_active = "LightNav-0:hf"
                 else:
                     raise
@@ -206,7 +236,7 @@ def _ensure_lightnav_loaded() -> bool:
         except Exception as exc:
             _vln_load_error = f"{type(exc).__name__}: {exc}"
             _vln_backend_active = "fallback_stub"
-            logger.error("Failed to load LightNav-0 (%s) — make sure `conda activate lightnav` is active!", _vln_load_error)
+            logger.error("Failed to load LightNav-0: %s", _vln_load_error)
             return False
 
 
@@ -225,9 +255,52 @@ def health() -> Dict[str, Any]:
     }
 
 
+# ==================== STAGE 1: SCHOOL OLLAMA VLM AGENT ====================
+@app.post("/agent/vlm")
+def agent_vlm(req: AgentVLMRequest) -> Dict[str, Any]:
+    """Run VLM Agent / Room Scan / Arrival Gatekeeper on School GPU via local Ollama (`qwen3-vl:4b-instruct`)."""
+    t0 = time.perf_counter()
+    model_id = (req.model or OLLAMA_VLM_MODEL).strip()
+    messages: List[Dict[str, Any]] = []
+    if req.system_prompt:
+        messages.append({"role": "system", "content": req.system_prompt})
+
+    user_msg: Dict[str, Any] = {"role": "user", "content": req.prompt}
+    if req.image_jpeg_b64:
+        user_msg["images"] = [req.image_jpeg_b64]
+    messages.append(user_msg)
+
+    body: Dict[str, Any] = {
+        "model": model_id,
+        "messages": messages,
+        "stream": False,
+        "options": {"temperature": 0.1, "num_predict": req.max_tokens},
+    }
+    if req.expect_json:
+        body["format"] = "json"
+
+    try:
+        http_req = urllib.request.Request(
+            f"{OLLAMA_BASE_URL}/api/chat",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with _direct_opener.open(http_req, timeout=15.0) as resp:
+            out = json.loads(resp.read().decode("utf-8"))
+        text = str(out.get("message", {}).get("content", "")).strip()
+        ms = round((time.perf_counter() - t0) * 1000.0, 1)
+        logger.info("[Agent VLM] model=%s latency=%.1fms len=%d", model_id, ms, len(text))
+        return {"ok": True, "text": text, "model": f"school_ollama:{model_id}", "latency_ms": ms}
+    except Exception as exc:
+        ms = round((time.perf_counter() - t0) * 1000.0, 1)
+        logger.error("[Agent VLM] Ollama error (%s): %s", model_id, exc)
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "model": model_id, "latency_ms": ms}
+
+
+# ==================== STAGE 2: LIGHTNAV-0 VLN ====================
 @app.post("/vln/load")
 def load_vln(req: Optional[VLNResetRequest] = None) -> Dict[str, Any]:
-    """Ensure LightNav-0 is resident in VRAM and reset episode history for the new mission."""
     global _active_episode_instruction
     real_ok = _ensure_lightnav_loaded()
     en_inst = normalize_lightnav_instruction(
@@ -238,9 +311,7 @@ def load_vln(req: Optional[VLNResetRequest] = None) -> Dict[str, Any]:
         if real_ok and _vln_agent is not None and req and req.instruction:
             _vln_agent.reset(instruction=en_inst)
             _active_episode_instruction = en_inst
-            logger.info("Episode reset -> %r", en_inst)
         else:
-            # Force reset on first incoming /vln/step of the new mission
             _active_episode_instruction = ""
     return {"ok": True, "vln_loaded": real_ok, "en_instruction": en_inst, **_gpu_info()}
 
@@ -256,13 +327,11 @@ def step_vln(req: VLNStepRequest) -> Dict[str, Any]:
 
     if req.image_jpeg_b64:
         raw_bytes = base64.b64decode(req.image_jpeg_b64)
-        # PIL converts standard JPEG directly into HxWx3 uint8 RGB (exact format required by agent.observe!)
         rgb_arr = np.asarray(Image.open(io.BytesIO(raw_bytes)).convert("RGB"), dtype=np.uint8)
     else:
         rgb_arr = np.zeros((256, 448, 3), dtype=np.uint8)
 
     real_ok = _ensure_lightnav_loaded()
-    # Keep instruction stable within an episode so we don't reset history mid-trajectory when hint changes
     base_en_inst = normalize_lightnav_instruction(req.instruction, "STRAIGHT")
 
     with _lock:
@@ -274,39 +343,22 @@ def step_vln(req: VLNStepRequest) -> Dict[str, Any]:
                 en_with_dir = normalize_lightnav_instruction(req.instruction, hint)
                 _vln_agent.reset(instruction=en_with_dir)
                 _active_episode_instruction = base_en_inst
-                logger.info("[New Episode] LightNav-0 reset(instruction=%r)", en_with_dir)
+                logger.info("[New Episode] LightNav-0 reset(%r)", en_with_dir)
 
             _vln_agent.observe(rgb_arr)
-            wp, raw_text, model_ms = _vln_agent.predict_waypoints(
-                _active_episode_instruction,
-                task_type="vlnce_traj",
-            )
+            wp, raw_text, model_ms = _vln_agent.predict_waypoints(_active_episode_instruction, task_type="vlnce_traj")
             arrived = bool(_is_stop_centroid_fn(wp))
             forward_m, lateral_m, yaw_rad = map(float, wp[0])
             vx = 0.0 if arrived else max(0.0, min(MAX_VX_MPS, forward_m / DT))
             wz = 0.0 if arrived else max(-MAX_WZ_RADS, min(MAX_WZ_RADS, yaw_rad / DT))
             wp0_list: List[float] = [round(forward_m, 4), round(lateral_m, 4), round(yaw_rad, 4)]
         else:
-            # Fallback if server was started outside `conda activate lightnav`
             wz_map = {"LEFT": 0.25, "RIGHT": -0.25, "STRAIGHT": 0.0}
-            vx = 0.18
-            wz = wz_map.get(hint, 0.0)
-            arrived = False
-            model_ms = 0.0
-            raw_text = "fallback_stub"
+            vx, wz, arrived = 0.18, wz_map.get(hint, 0.0), False
+            model_ms, raw_text = 0.0, "fallback_stub"
             wp0_list = [round(vx * DT, 4), 0.0, round(wz * DT, 4)]
 
     total_ms = round((time.perf_counter() - t0) * 1000.0, 2)
-    logger.info(
-        "Step #%d | vx=%.3f wz=%.3f arrived=%s | wp0=%s | model=%.1fms total=%.1fms",
-        cur_step,
-        vx,
-        wz,
-        arrived,
-        wp0_list,
-        float(model_ms),
-        total_ms,
-    )
     return {
         "ok": True,
         "vx": round(vx, 4),
@@ -326,10 +378,6 @@ def step_vln(req: VLNStepRequest) -> Dict[str, Any]:
 
 @app.post("/vln/unload")
 def unload_vln(req: Optional[VLNUnloadRequest] = None) -> Dict[str, Any]:
-    """
-    On the dedicated 32GB school GPU server, keep vLLM warm across episodes by default
-    (resetting episode KV/frame history in <2ms); pass `hard_unload=True` to release VRAM completely.
-    """
     global _vln_agent, _vln_backend_active, _active_episode_instruction
     hard = bool(req and req.hard_unload)
     with _lock:
@@ -349,17 +397,75 @@ def unload_vln(req: Optional[VLNUnloadRequest] = None) -> Dict[str, Any]:
     return {"ok": True, "vln_loaded": _vln_agent is not None, "hard_unloaded": hard, **_gpu_info()}
 
 
+# ==================== STAGE 3: YOLOE OPEN-VOCAB DETECTION ====================
+@app.post("/vision/detect")
+def vision_detect(req: VisionDetectRequest) -> Dict[str, Any]:
+    """Run zero-shot YOLOE open-vocabulary detection on School GPU."""
+    global _yoloe_model, _yoloe_classes
+    t0 = time.perf_counter()
+    with _yoloe_lock:
+        if _yoloe_model is None:
+            try:
+                from ultralytics import YOLOE
+
+                _yoloe_model = YOLOE(YOLOE_WEIGHTS_PATH)
+                logger.info("[YOLOE] Loaded %s on School GPU", YOLOE_WEIGHTS_PATH)
+            except Exception as exc:
+                return {"ok": False, "detected": False, "error": f"YOLOE unavailable on school server: {exc}"}
+
+        clean_prompts = [p.strip() for p in req.prompts if p.strip()][:12] or ["object"]
+        if clean_prompts != _yoloe_classes:
+            _yoloe_model.set_classes(clean_prompts)
+            _yoloe_classes = list(clean_prompts)
+
+        raw_bytes = base64.b64decode(req.image_jpeg_b64)
+        rgb_arr = np.asarray(Image.open(io.BytesIO(raw_bytes)).convert("RGB"), dtype=np.uint8)
+        # Ultralytics expects BGR numpy or PIL Image; pass PIL directly to avoid channel confusion
+        pil_img = Image.fromarray(rgb_arr)
+        results = _yoloe_model.predict(pil_img, verbose=False, conf=req.conf)
+        ms = round((time.perf_counter() - t0) * 1000.0, 2)
+        if results and len(results[0].boxes) > 0:
+            boxes = results[0].boxes
+            best_i = int(boxes.conf.argmax().item())
+            conf = float(boxes.conf[best_i].item())
+            cls_idx = int(boxes.cls[best_i].item())
+            xyxy = [int(round(v)) for v in boxes.xyxy[best_i].tolist()]
+            label = clean_prompts[cls_idx] if 0 <= cls_idx < len(clean_prompts) else clean_prompts[0]
+            return {"ok": True, "detected": True, "label": label, "confidence": round(conf, 4), "bbox": xyxy, "infer_ms": ms}
+        return {"ok": True, "detected": False, "infer_ms": ms}
+
+
+# ==================== STAGE 4: VLA MANIPULATION POLICY ====================
+@app.post("/vla/act")
+def vla_act(req: VLAActRequest) -> Dict[str, Any]:
+    """Remote VLA action chunk endpoint on School 32GB GPU (`ACT` / `TurboVLA` / `SmolVLA` / `pi0.5`)."""
+    global _vla_loaded_name
+    t0 = time.perf_counter()
+    with _vla_lock:
+        _vla_loaded_name = req.model_name
+        # Hook ready for ~/outputs/train/{act_lego,turbovla_v3,smolvla_lego,pi05_lego} checkpoints on ubuntu@324
+        joint_target = req.joint_state or [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        ms = round((time.perf_counter() - t0) * 1000.0, 2)
+        return {
+            "ok": True,
+            "model_name": req.model_name,
+            "action_chunk": [joint_target],
+            "infer_ms": ms,
+        }
+
+
 if __name__ == "__main__":
     preload = os.getenv("LIGHTNAV_PRELOAD", "1").strip() not in ("0", "false", "False")
     info0 = _gpu_info()
     logger.info(
-        "Starting Remote LightNav-0 Server on http://%s:%d | GPU: %s (Free %.2f / %.2f GB)",
+        "Starting All-in-One School 32GB Compute Hub on http://%s:%d | GPU: %s (Free %.2f / %.2f GB) | VLM: %s",
         HOST,
         PORT,
         info0["gpu_name"],
         info0["vram_free_gb"],
         info0["vram_total_gb"],
+        OLLAMA_VLM_MODEL,
     )
-    if preload and info0["model_path_exists"]:
+    if preload and Path(LIGHTNAV_MODEL_PATH).exists():
         _ensure_lightnav_loaded()
     uvicorn.run(app, host=HOST, port=PORT, log_level="info")

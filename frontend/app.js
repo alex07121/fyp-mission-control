@@ -122,6 +122,63 @@
     }
   });
 
+  // 2B. Whole-Room Scanner, Camera Switcher & One-Click Navigate-to-Object
+  document.querySelectorAll("[data-cam]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const idx = parseInt(btn.dataset.cam, 10);
+      await apiPost("/api/camera/select", { index: idx });
+      await pollStatus();
+    });
+  });
+
+  $("btnScanView").addEventListener("click", async () => {
+    $("roomStatusText").textContent = "⏳ 正在抓拍 Cam 0 分析眼前物体...";
+    const { status, data } = await apiPost("/api/room/scan", { full_360: false });
+    if (status !== 200) {
+      $("roomStatusText").textContent = `⚠️ 无法启动扫描: ${data.error || status}`;
+    }
+    await pollStatus();
+  });
+
+  $("btnScan360").addEventListener("click", async () => {
+    $("roomStatusText").textContent = "🔄 已发送 360° 全屋旋转扫描指令，小车即将分 8 步旋转...";
+    const { status, data } = await apiPost("/api/room/scan", { full_360: true });
+    if (status !== 200) {
+      $("roomStatusText").textContent = `⚠️ 无法启动 360° 扫描: ${data.error || status}`;
+    }
+    await pollStatus();
+  });
+
+  $("btnGoCustomObj").addEventListener("click", async () => {
+    const val = $("inpCustomObj").value.trim();
+    if (!val) return;
+    await apiPost("/api/room/navigate", { target_en: val, target_zh: val, bearing_deg: 0.0 });
+    await pollStatus();
+  });
+
+  $("btnTestTurnL90")?.addEventListener("click", async () => {
+    $("roomStatusText").textContent = "📐 正在测试原地左转 +90° (短脉冲 + Cam 0 视觉闭环)...";
+    const { status } = await apiPost("/api/car/test_turn", { deg: 90.0 });
+    $("roomStatusText").textContent = status === 200 ? "✅ 左转 +90° 测试完成！请肉眼核对车头是否刚好转了约 90°" : "⚠️ 急停锁死中，请先解除急停";
+  });
+
+  $("btnTestTurnR90")?.addEventListener("click", async () => {
+    $("roomStatusText").textContent = "📐 正在测试原地右转 -90° (短脉冲 + Cam 0 视觉闭环)...";
+    const { status } = await apiPost("/api/car/test_turn", { deg: -90.0 });
+    $("roomStatusText").textContent = status === 200 ? "✅ 右转 -90° 测试完成！请肉眼核对车头是否回正" : "⚠️ 急停锁死中，请先解除急停";
+  });
+
+  $("roomObjectsGrid").addEventListener("click", async (ev) => {
+    const btn = ev.target.closest(".room-obj-btn");
+    if (!btn) return;
+    await apiPost("/api/room/navigate", {
+      target_en: btn.dataset.en || "",
+      target_zh: btn.dataset.zh || "",
+      bearing_deg: parseFloat(btn.dataset.bearing || "0"),
+    });
+    await pollStatus();
+  });
+
   // 3. Hardware Lens Profile & Blind-Walk Controls
   $("btnLens80").addEventListener("click", async () => {
     await apiPost("/api/config", { lens_mode: "80cm" });
@@ -340,6 +397,22 @@
 
       // Agent & BCI
       $("udpPortBadge").textContent = `UDP :${s.bci.udp_port}`;
+      if ($("camIdxBadge") && s.camera_index !== undefined) {
+        $("camIdxBadge").textContent = `当前镜头: Cam ${s.camera_index}${s.camera_index === 0 ? " (车头广角)" : ""}`;
+      }
+      if (s.room) {
+        $("roomStatusText").textContent = `${s.room.progress_msg}${s.room.scene_summary ? " | 场景: " + s.room.scene_summary : ""}`;
+        const objs = s.room.objects || [];
+        const sig = JSON.stringify(objs);
+        if ($("roomObjectsGrid").dataset.sig !== sig) {
+          $("roomObjectsGrid").dataset.sig = sig;
+          $("roomObjectsGrid").innerHTML = objs.map((o) => {
+            const b = Number(o.bearing_deg || 0);
+            const dirStr = Math.abs(b) <= 12 ? "正前" : (b > 0 ? `左 ${b.toFixed(0)}°` : `右 ${Math.abs(b).toFixed(0)}°`);
+            return `<button class="btn-opt room-obj-btn" style="padding:7px 12px; border-color:#3b82f6;" data-en="${escapeHtml(o.name_en)}" data-zh="${escapeHtml(o.name_zh)}" data-bearing="${b}">🎯 <b>${escapeHtml(o.name_zh)}</b> <small>(${escapeHtml(o.name_en)} · ${dirStr} · ${escapeHtml(o.distance)})</small></button>`;
+          }).join("");
+        }
+      }
       $("watchdogBadge").textContent = `Watchdog Trips: ${s.agent.watchdog_trips}`;
       $("vlnRejCount").textContent = String(s.fsm.vln_early_stop_rejections);
       if (s.agent.last_call) {

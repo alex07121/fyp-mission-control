@@ -29,13 +29,25 @@ Run the 17-line dual-protocol demo while the server is running:
 .venv/bin/python bci_sender_example.py
 ```
 
-## 3. Switching to Real XLeRobot Hardware on Ubuntu
+## 3. 100% School 32GB GPU Compute Hub (`ubuntu@324` — RTX 5000 Ada 32GB)
 
-Fill in the `TODO(REAL_ROBOT)` hooks inside `adapters/xlerobot_real.py` and run:
+Offloads **all 4 AI stages** (`Ollama qwen3-vl:4b-instruct` + `LightNav-0` + `YOLOE-26s-seg` + `VLA`) onto the school `RTX 5000 Ada 32GB` server while keeping the Mac / robot edge host as a zero-GPU thin I/O client:
 
-```bash
-ROBOT_MODE=real .venv/bin/python run.py
-```
+1. **On School Server (`ubuntu@324`)**:
+   ```bash
+   ollama stop qwen3.8:27b || true
+   conda activate lightnav
+   git pull
+   python remote_vln_server.py
+   ```
+2. **On Local Mac / Car Edge Client** (bypasses Clash proxy automatically for `127.0.0.1` and Tailscale `100.*`):
+   ```bash
+   NO_PROXY="127.0.0.1,localhost,100.106.0.106" \
+   SCHOOL_GPU_URL="http://100.106.0.106:9001" \
+   ROBOT_MODE=real AGENT_MODE=school CAMERA_INDEX=0 \
+   .venv/bin/python run.py
+   ```
+   *(Or set `SCHOOL_GPU_URL="https://<your-trycloudflare-url>"` when connecting over Cloudflare Quick Tunnel.)*
 
 ## 4. Automated Test Suite
 

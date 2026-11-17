@@ -23,7 +23,7 @@ class AgentBenchRequest(BaseModel):
         min_length=1,
         max_length=500,
     )
-    mode: Optional[Literal["cloud", "mock", "auto"]] = None
+    mode: Optional[Literal["cloud", "mock", "auto", "school"]] = None
     simulate_delay_s: float = Field(default=0.0, ge=0.0, le=15.0)
     simulate_error: bool = Field(default=False)
 
@@ -33,11 +33,11 @@ class RuntimeConfigUpdate(BaseModel):
 
     lens_mode: Optional[Literal["80cm", "20cm"]] = None
     blind_walk_enabled: Optional[bool] = None
-    agent_mode: Optional[Literal["cloud", "mock", "auto"]] = None
+    agent_mode: Optional[Literal["cloud", "mock", "auto", "school"]] = None
     cruise_speed_mps: Optional[float] = Field(default=None, ge=0.05, le=0.45)
     agent_interval_s: Optional[float] = Field(default=None, ge=0.8, le=5.0)
     watchdog_timeout_s: Optional[float] = Field(default=None, ge=0.5, le=2.35)
-    vla_model: Optional[Literal["SmolVLA", "pi0.5"]] = None
+    vla_model: Optional[Literal["ACT", "TurboVLA", "SmolVLA", "pi0.5"]] = None
     detection_prompts: Optional[List[str]] = Field(default=None, min_length=1, max_length=12)
 
     @field_validator("detection_prompts")

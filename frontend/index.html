@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>FYP Mission Control — Embodied BCI · VLN · YOLOE · VLA</title>
-  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="stylesheet" href="/static/styles.css?v=20261116_3" />
 </head>
 <body>
   <!-- Sticky Top Emergency Bar -->
@@ -51,6 +51,33 @@
         <div class="vram-bar-fill" id="vramFill" style="width: 11.7%"></div>
       </div>
     </div>
+  </section>
+
+  <!-- Whole-Room Object Analyzer & One-Click Object Navigator (Real Car + Cam 0 + LightNav-0) -->
+  <section class="card" style="margin: 12px 18px 0 18px; border: 1px solid #2d6cdf;">
+    <div class="card-header" style="flex-wrap: wrap; gap: 8px;">
+      <h2>🏠 房间全景识别 &amp; 一键前往任意物件 (Gemini Flash-Lite + LightNav-0 实车闭环)</h2>
+      <div style="display:flex; gap:6px; align-items:center;">
+        <span class="badge" id="camIdxBadge">当前镜头: Cam 0 (车头广角)</span>
+        <button class="btn-mini" data-cam="0">切 Cam 0 (车头)</button>
+        <button class="btn-mini" data-cam="1">切 Cam 1</button>
+        <button class="btn-mini" data-cam="2">切 Cam 2</button>
+      </div>
+    </div>
+
+    <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:8px;">
+      <button class="btn-primary" id="btnScanView">📸 1. 分析眼前画面物体 (~1s)</button>
+      <button class="btn-secondary" id="btnScan360">🔄 360° 防缠线扫全屋</button>
+      <button class="btn-mini" id="btnTestTurnL90">📐 测左转 90°</button>
+      <button class="btn-mini" id="btnTestTurnR90">📐 测右转 90°</button>
+      <input type="text" id="inpCustomObj" style="flex:1; min-width:200px;" placeholder="或直接输入任意英文目标前往 (如: orange chair / black backpack / door)..." />
+      <button class="btn-primary" id="btnGoCustomObj">🚀 直接开过去</button>
+    </div>
+
+    <div id="roomStatusText" style="font-size:13px; color:#93c5fd; margin-bottom:8px;">
+      就绪：点击「分析眼前画面物体」或「360° 原地转一圈扫全屋」，识别到的所有物件会生成下方一键导航按钮
+    </div>
+    <div id="roomObjectsGrid" style="display:flex; flex-wrap:wrap; gap:8px;"></div>
   </section>
 
   <!-- Main 3-Column Mission Control Grid -->
@@ -139,14 +166,17 @@
         <div class="slider-row">
           <label>Agent 模式:</label>
           <select id="selAgentMode">
-            <option value="auto">Auto (Vertex AI 优先)</option>
+            <option value="auto">Auto (School GPU 优先)</option>
+            <option value="school">School GPU (强制学校 RTX 5000 32GB)</option>
             <option value="cloud">Cloud (强制 Vertex AI)</option>
             <option value="mock">Mock (本地极速仿真)</option>
           </select>
           <label>VLA:</label>
           <select id="selVlaModel">
-            <option value="SmolVLA">SmolVLA (6.4GB)</option>
-            <option value="pi0.5">π0.5 (7.2GB)</option>
+            <option value="ACT">ACT (~1.5GB)</option>
+            <option value="TurboVLA">TurboVLA (~0.8GB)</option>
+            <option value="SmolVLA" selected>SmolVLA (~4.5GB)</option>
+            <option value="pi0.5">π0.5 (~10GB)</option>
           </select>
           <button class="btn-primary" id="btnBenchAgent">单次抓拍测速</button>
         </div>
@@ -226,6 +256,6 @@
     </section>
   </main>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=20261116_4"></script>
 </body>
 </html>

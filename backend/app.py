@@ -23,6 +23,7 @@ from backend.modules.bci_gateway import BCIGateway
 from backend.modules.cloud_agent import CloudAgentEngine
 from backend.modules.data_logger import MissionDataLogger
 from backend.modules.fsm_controller import FSMController
+from backend.modules.room_explorer import RoomExplorer
 from backend.modules.vision_depth import VisionDepthCalibrator
 from backend.schemas import (
     AgentBenchRequest,
@@ -70,14 +71,19 @@ class MissionRuntime:
             agent=self.agent,
             data_logger=self.data_logger,
         )
+        self.room_explorer = RoomExplorer(adapter=self.adapter, data_logger=self.data_logger)
 
         eff_udp_port = udp_port if udp_port is not None else int(os.getenv("UDP_PORT", str(DEFAULT_UDP_PORT)))
         self.bci = BCIGateway(
             dispatch_callback=self.fsm.submit_task,
-            estop_callback=self.fsm.trigger_estop,
+            estop_callback=self._trigger_all_estop,
             is_estop_active=lambda: self.adapter.estop_active,
             udp_port=eff_udp_port,
         )
+
+    def _trigger_all_estop(self, reason: str) -> Dict[str, Any]:
+        self.room_explorer.abort()
+        return self.fsm.trigger_estop(reason)
 
     def start(self) -> None:
         GLOBAL_SHUTDOWN_EVENT.clear()
@@ -88,6 +94,7 @@ class MissionRuntime:
     def stop(self) -> None:
         self.shutdown_evt.set()
         GLOBAL_SHUTDOWN_EVENT.set()
+        self.room_explorer.abort()
         self.bci.stop_udp_server()
         self.fsm.shutdown()
         self.adapter.shutdown()
@@ -108,10 +115,12 @@ class MissionRuntime:
 
         return {
             "robot_mode": self.robot_mode,
+            "camera_index": getattr(self.adapter, "active_camera_index", 0),
             "pose": self.adapter.get_pose().to_dict(),
             "gatekeeper": self.adapter.get_gatekeeper_status(),
             "vram": self.adapter.get_vram_status().to_dict(),
             "fsm": self.fsm.get_status(),
+            "room": self.room_explorer.get_snapshot(),
             "vision": self.vision.get_status(),
             "agent": self.agent.get_status(),
             "bci": self.bci.get_status(),
@@ -155,6 +164,13 @@ def create_app(
     if FRONTEND_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 
+    @app.middleware("http")
+    async def disable_static_cache(request: Request, call_next: Any) -> Response:
+        resp = await call_next(request)
+        if request.url.path == "/" or request.url.path.startswith("/static/"):
+            resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        return resp
+
     @app.get("/", include_in_schema=False)
     async def index() -> Response:
         index_file = FRONTEND_DIR / "index.html"
@@ -196,8 +212,45 @@ def create_app(
                 reason = sanitize_printable_token(str(body["reason"]), max_len=100) or reason
         except Exception:
             pass
-        gate = runtime.fsm.trigger_estop(reason)
+        gate = runtime._trigger_all_estop(reason)
         return {"ok": True, "gatekeeper": gate}
+
+    @app.post("/api/camera/select")
+    async def select_camera(request: Request) -> Dict[str, Any]:
+        body = await request.json()
+        idx = int(body.get("index", 0))
+        if hasattr(runtime.adapter, "set_camera_index"):
+            runtime.adapter.set_camera_index(idx)
+        return {"ok": True, "requested_index": idx}
+
+    @app.post("/api/room/scan")
+    async def room_scan(request: Request) -> JSONResponse:
+        body = await request.json()
+        full_360 = bool(body.get("full_360", False))
+        res = runtime.room_explorer.start_scan(full_360=full_360)
+        return JSONResponse(status_code=200 if res.get("ok") else 409, content=res)
+
+    @app.post("/api/room/navigate")
+    async def room_navigate(request: Request) -> JSONResponse:
+        body = await request.json()
+        res = runtime.room_explorer.start_navigate_to(
+            target_en=str(body.get("target_en", "")),
+            target_zh=str(body.get("target_zh", "")),
+            bearing_deg=float(body.get("bearing_deg", 0.0)),
+        )
+        return JSONResponse(status_code=200 if res.get("ok") else 409, content=res)
+
+    @app.post("/api/car/test_turn")
+    async def car_test_turn(request: Request) -> JSONResponse:
+        if runtime.adapter.estop_active:
+            return JSONResponse(status_code=409, content={"ok": False, "error": "E-Stop 已锁死"})
+        body = await request.json()
+        deg = float(body.get("deg", 90.0))
+        loop = asyncio.get_running_loop()
+        if hasattr(runtime.adapter, "turn_in_place_deg"):
+            ok = await loop.run_in_executor(runtime.agent_pool, runtime.adapter.turn_in_place_deg, deg, runtime.adapter.estop_epoch)
+            return JSONResponse(status_code=200, content={"ok": ok, "deg": deg})
+        return JSONResponse(status_code=200, content={"ok": True, "deg": deg, "mode": "mock"})
 
     @app.post("/api/estop/reset")
     async def reset_estop() -> JSONResponse:
